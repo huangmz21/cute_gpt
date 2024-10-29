@@ -93,12 +93,12 @@ class GPT(nn.Module):
         })
         self.lm_head=nn.Linear(config.n_embed, config.vocab_size, bias=False)
     
-    def forward(self,idx):
+    def forward(self,idx,targets= None):
         #idx shape(B,T)
         B,T=idx.size()
         assert T<= self.config.block_size
         #这里的embedding是一个查找表，输入indices，
-        #设indices为[1,2,3],ouput=[embed[1,:],...],所以扩大了矩阵维度
+        #设indices为[1,2,3],ouput=[embed[1,:],...],所以扩大了矩阵维度,保证device一致
         pos = torch.arange(0,T,dtype=torch.long,device=idx.device)
         pos_emb = self.transformer.wpe(pos)  #(T,n_embed)
         tok_emb = self.transformer.wte(idx)  #(B,T,n_embed)
@@ -108,7 +108,13 @@ class GPT(nn.Module):
             x=block(x)
         x=self.transformer.ln_f(x)
         logits = self.lm_head(x)  #(B,T,vocab_size)
-        return logits
+        loss = None
+        if targets is not  None:
+            loss = F.cross_entropy(logits.view(-1,logits.size(-1)),targets.view(-1))
+        return logits, loss
+            
+
+        
     @classmethod
     def from_pretrained(cls,model_type):
         "loads from huggingface"
@@ -156,23 +162,24 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
         return model
 
-model = GPT.from_pretrained('gpt2')
-print("didn't fail")
+#model = GPT.from_pretrained('gpt2')
+#print("didn't fail")
 
 #demo------------
 num_return_sequences = 5
 max_length = 30
-
-model=GPT.from_pretrained('gpt2')
+device = 'cuda'
+#model=GPT.from_pretrained('gpt2')
+model = GPT(GPTconfig())
 model.eval()
-model.to('cuda')
+model.to(device)
 
 #prefix tokens
 enc=tiktoken.get_encoding('gpt2')
 tokens = enc.encode("hi,I am an LLM")
 tokens = torch.tensor(tokens, dtype = torch.long)
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences,1)
-x = tokens.to('cuda')
+x = tokens.to(device)
 
 # generate! now x is (B,T)
 
@@ -180,7 +187,7 @@ torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 while x.size(1) < max_length:
     with torch.no_grad():
-        logits = model(x) #(B,T,vocab_size)
+        logits ,loss = model(x) #(B,T,vocab_size)
         ##take the logits at the last
         logits = logits[:,-1,:]
         probs = F.softmax(logits, dim=-1)
@@ -198,6 +205,30 @@ for i in range(num_return_sequences):
     tokens=x[i,:max_length].tolist()
     decoded = enc.decode(tokens)
     print(">>",decoded)
+
+#-----trainging process
+#dataloader
+enc = tiktoken.get_encoding('gpt2')
+with open('input.txt', 'r') as f:
+    text = f.read()
+text = text[:1000]
+tokens = enc.encode(text)
+B, T =4, 32
+buf = torch.tensor(tokens[:B*T+1]).to(device)
+x = buf[:-1].view(B,T)
+y = buf[1:].view(B,T)
+#loss
+model= GPT(GPTconfig())
+model.to(device)
+logits, loss= model(x, y)  #用了重载函数
+#optimizer
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+for i in range(50):
+    optimizer.zero_grad()
+    logits, loss = model(x,y)
+    loss.backward()
+    optimizer.step()
+    print(f"step{i}, loss{loss.item()}")
 
 
 
