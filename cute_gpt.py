@@ -3,6 +3,10 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
+import os
+import tiktoken
+
+os.environ["CUDA_VISIBLE_DEVICES"]="7"
 
 #
 @dataclass
@@ -53,7 +57,7 @@ class MLP(nn.Module):
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4*config.n_embed,config.n_embed)
     
-    def foward(self,x):
+    def forward(self,x):
         x=self.c_fc(x)
         x=self.gelu(x)
         x=self.c_proj(x)
@@ -154,6 +158,47 @@ class GPT(nn.Module):
 
 model = GPT.from_pretrained('gpt2')
 print("didn't fail")
-    
+
+#demo------------
+num_return_sequences = 5
+max_length = 30
+
+model=GPT.from_pretrained('gpt2')
+model.eval()
+model.to('cuda')
+
+#prefix tokens
+enc=tiktoken.get_encoding('gpt2')
+tokens = enc.encode("hi,I am an LLM")
+tokens = torch.tensor(tokens, dtype = torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences,1)
+x = tokens.to('cuda')
+
+# generate! now x is (B,T)
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    with torch.no_grad():
+        logits = model(x) #(B,T,vocab_size)
+        ##take the logits at the last
+        logits = logits[:,-1,:]
+        probs = F.softmax(logits, dim=-1)
+        # do top-k sampling of 50
+        # so the topk_prob is (5,50),可能生成的token在0-50256，所以porbs是概率值，indices对应token的位置
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        # select a token,使用概率值进行采样
+        ix = torch.multinomial(topk_probs,1)  # (B,1)
+        xcol = torch.gather(topk_indices,-1,ix) #(B,1)
+        # append to the sequence
+        x = torch.cat((x,xcol),dim=1)
+
+#print the generated results
+for i in range(num_return_sequences):
+    tokens=x[i,:max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">>",decoded)
+
+
 
 
