@@ -21,8 +21,11 @@ class CasualSelfAttention(nn.Module):
     def __init__(self,config):
         super().__init__()
         assert config.n_embed % config.n_head == 0
+        #qkv
         self.c_attn = nn.Linear(config.n_embed, 3*config.n_embed)
+        #ouput projection
         self.c_proj = nn.Linear(config.n_embed, config.n_embed)
+        self.c_proj.CUTE_SCALE_INIT = 1
         #multi-head attention:多个头并行计算Q,K,V,生成的结果拼接即可
         self.n_head=config.n_head
         self.n_embed=config.n_embed
@@ -56,6 +59,9 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embed, 4* config.n_embed)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4*config.n_embed,config.n_embed)
+        # notice that the c_proj is always the last layer and then be added,so we init it by 1/sqrt
+        self.c_proj.CUTE_SCALE_INIT = 1
+        
     
     def forward(self,x):
         x=self.c_fc(x)
@@ -74,6 +80,7 @@ class Block(nn.Module):
         self.ln_2=nn.LayerNorm(config.n_embed)
         self.mlp=MLP(config)
     def forward(self,x):
+        # take care that all the residual layer needs normalization,so when you add it ,scale by 1/sqrt(N)
         x=x+self.attn(self.ln_1(x))
         x=x+self.mlp(self.ln_2(x))
         return x
@@ -92,6 +99,24 @@ class GPT(nn.Module):
 
         })
         self.lm_head=nn.Linear(config.n_embed, config.vocab_size, bias=False)
+
+        # weights sharing
+        self.transformer.wte.weight = self.lm_head.weight
+        # init params
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        std = 0.02
+        if hasattr(module,'CUTE_SCALE_INIT'):
+            std*= (2 * self.config.n_layer) ** -0.5
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+
     
     def forward(self,idx,targets= None):
         #idx shape(B,T)
@@ -161,14 +186,42 @@ class GPT(nn.Module):
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
         return model
+class DataLoaderLite:
+    def __init__(self,B,T):
+        self.B = B
+        self.T = T
+        #load 
+        with open('/home/huangmingzhe/cute_gpt/input.txt','r')as f:
+            text = f.read()
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"load {len(self.tokens)} tokens")
+        print(f"1 epoch ={len(self.tokens) // (B*T)} batches") 
+        #state
+        self.current_position = 0
 
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position:self.current_position+B*T+1]
+        x = buf[:-1].view(B,T)
+        y = buf[1:].view(B,T)
+        self.current_position +=B*T
+        # if to the end
+        if self.current_position + (B*T+1) > len(self.tokens)-1:
+            self.current_position = 0
+        return x, y
+
+        
 #model = GPT.from_pretrained('gpt2')
 #print("didn't fail")
 
 #demo------------
 num_return_sequences = 5
 max_length = 30
-device = 'cuda'
+device = 'cpu'
+if torch.cuda.is_available():
+    device='cuda'
 #model=GPT.from_pretrained('gpt2')
 model = GPT(GPTconfig())
 model.eval()
@@ -208,23 +261,17 @@ for i in range(num_return_sequences):
 
 #-----trainging process
 #dataloader
-enc = tiktoken.get_encoding('gpt2')
-with open('input.txt', 'r') as f:
-    text = f.read()
-text = text[:1000]
-tokens = enc.encode(text)
-B, T =4, 32
-buf = torch.tensor(tokens[:B*T+1]).to(device)
-x = buf[:-1].view(B,T)
-y = buf[1:].view(B,T)
+train_loader = DataLoaderLite(B=4, T=32)
 #loss
 model= GPT(GPTconfig())
 model.to(device)
-logits, loss= model(x, y)  #用了重载函数
+#logits, loss= model(x, y)  #用了重载函数
 #optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 for i in range(50):
     optimizer.zero_grad()
+    x,y =train_loader.next_batch()
+    x, y = x.to(device), y.to(device)
     logits, loss = model(x,y)
     loss.backward()
     optimizer.step()
