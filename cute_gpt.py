@@ -5,6 +5,7 @@ from torch.nn import functional as F
 import math
 import os
 import tiktoken
+import time
 
 os.environ["CUDA_VISIBLE_DEVICES"]="7"
 
@@ -222,6 +223,7 @@ max_length = 30
 device = 'cpu'
 if torch.cuda.is_available():
     device='cuda'
+print(device)
 #model=GPT.from_pretrained('gpt2')
 model = GPT(GPTconfig())
 model.eval()
@@ -261,7 +263,9 @@ for i in range(num_return_sequences):
 
 #-----trainging process
 #dataloader
-train_loader = DataLoaderLite(B=4, T=32)
+train_loader = DataLoaderLite(B=16, T=1024)
+#this only speed up the calculation in cuda,however the variables are still fp32
+torch.set_float32_matmul_precision('high')
 #loss
 model= GPT(GPTconfig())
 model.to(device)
@@ -269,13 +273,21 @@ model.to(device)
 #optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 for i in range(50):
+    t0 = time.time()
     optimizer.zero_grad()
     x,y =train_loader.next_batch()
     x, y = x.to(device), y.to(device)
-    logits, loss = model(x,y)
+    with torch.autocast(device_type=device,dtype=torch.bfloat16):
+        logits, loss = model(x,y)
+    #import code; code.interact(local=locals())
     loss.backward()
     optimizer.step()
-    print(f"step{i}, loss{loss.item()}")
+    #让CPU和GPU同步，从而确保运算执行完
+    torch.cuda.synchronize()
+    t1=time.time()
+    dt = (t1-t0)*1000
+    tokens_per_sec = (train_loader.B * train_loader.T)/(t1 - t0)
+    print(f"step{i}, loss{loss.item()},dt: {dt:.2f}ms,tokens_per_sec: {tokens_per_sec:.2f}")
 
 
 
