@@ -7,7 +7,7 @@ import os
 import tiktoken
 import time
 
-os.environ["CUDA_VISIBLE_DEVICES"]="7"
+os.environ["CUDA_VISIBLE_DEVICES"]="4"
 
 #
 @dataclass
@@ -39,14 +39,18 @@ class CasualSelfAttention(nn.Module):
         B,T,C=x.size()  #batch size, sequence length , n_embed
         qkv=self.c_attn(x)
         q,k,v=qkv.split(self.n_embed,dim=2)
-        k=k.view(B,T,self.n_head,C//self.n_head).transpose(1,2)
+        k=k.view(B,T,self.n_head,C//self.n_head).transpose(1,2) #因为要实现对于batch和num_head的并行，所以size = (B,num,N,embed//num)
         q=q.view(B,T,self.n_head,C//self.n_head).transpose(1,2)
         v=v.view(B,T,self.n_head,C//self.n_head).transpose(1,2)
         #attention
-        att = (q @ k.transpose(-2,-1))*(1.0/math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:,:,:T,:T]==0,float('-inf'))
-        att = F.softmax(att,dim=-1)
-        y = att @ v
+        # att = (q @ k.transpose(-2,-1))*(1.0/math.sqrt(k.size(-1)))
+        # att = att.masked_fill(self.bias[:,:,:T,:T]==0,float('-inf'))
+        # att = F.softmax(att,dim=-1)
+        # y = att @ v
+        #---flash attention---
+        y = F.scaled_dot_product_attention(q,k,v,is_causal=True)
+
+
         y = y.transpose(1,2).contiguous().view(B,T,C)   #just concatenate
         y=self.c_proj(y)
 
@@ -135,6 +139,7 @@ class GPT(nn.Module):
         x=self.transformer.ln_f(x)
         logits = self.lm_head(x)  #(B,T,vocab_size)
         loss = None
+        # 这里算loss的时候，logits的维度是(B,T,vocab_size),targets的维度是(B,T)，所以改vocab_szie没有影响
         if targets is not  None:
             loss = F.cross_entropy(logits.view(-1,logits.size(-1)),targets.view(-1))
         return logits, loss
@@ -225,7 +230,7 @@ if torch.cuda.is_available():
     device='cuda'
 print(device)
 #model=GPT.from_pretrained('gpt2')
-model = GPT(GPTconfig())
+model = GPT(GPTconfig(vocab_size=50304))
 model.eval()
 model.to(device)
 
@@ -267,8 +272,14 @@ train_loader = DataLoaderLite(B=16, T=1024)
 #this only speed up the calculation in cuda,however the variables are still fp32
 torch.set_float32_matmul_precision('high')
 #loss
-model= GPT(GPTconfig())
+model= GPT(GPTconfig(vocab_size=50304))
+# 问题：
+# 1.在wte的embedding中用的，相当于增加了用不到的查找表，只是浪费空间
+# 2.在classifier最后一层
+
+
 model.to(device)
+model = torch.compile(model)
 #logits, loss= model(x, y)  #用了重载函数
 #optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
@@ -277,6 +288,7 @@ for i in range(50):
     optimizer.zero_grad()
     x,y =train_loader.next_batch()
     x, y = x.to(device), y.to(device)
+    #混合精度
     with torch.autocast(device_type=device,dtype=torch.bfloat16):
         logits, loss = model(x,y)
     #import code; code.interact(local=locals())

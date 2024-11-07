@@ -12,3 +12,11 @@
 * most of the bottleneck in the training is the limitation of GPU bandwidth.The tensor core is always waiting fot data
 * ![alt text](image.png)
 * 混合精度：权重是fp32，而激活值和loss是bf16
+* 使用torch.compile可以加速的原因：
+* 知道整体网络架构所以可以优化
+* 知道整个计算流程避免了反复移动并且保存中间结果，kernel fusion
+* 使用flash attention加速,将q,k在seq维度上进行切分，然后计算。
+
+## 优化cuda kernel的实现
+
+* odd and even 用更大的，且是2的幂的vocab_size ,padding the input
